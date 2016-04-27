@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 %% API functions
--export([start_link/3,
+-export([start_link/4,
          process_data/2,
          finish/1]).
 
@@ -29,8 +29,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(WorkerFun, NextLink, NumWorkers) ->
-    Args = [WorkerFun, NextLink, NumWorkers],
+start_link(Sup, WorkerFun, NextLink, NumWorkers) ->
+    Args = [Sup, WorkerFun, NextLink, NumWorkers],
     PoolName = get_pool_name(WorkerFun),
     gen_server:start_link({local, PoolName}, ?MODULE, Args, []).
 
@@ -55,10 +55,10 @@ finish(WorkerPool) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([WorkerFun, NextLink, NumWorkers]) ->
+init([Sup, WorkerFun, NextLink, NumWorkers]) ->
     WorkerArgs = [{worker_fun, WorkerFun}, 
                   {next_link, NextLink}],
-    Workers = start_workers(WorkerArgs, NumWorkers),
+    Workers = start_workers(Sup, WorkerArgs, NumWorkers),
     {ok, #state{workers = Workers, next_link = NextLink}}.
 
 %%--------------------------------------------------------------------
@@ -141,15 +141,19 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-start_workers(WorkerArgs, NumWorkers) ->
-    do_start_workers(WorkerArgs, queue:new(), NumWorkers).
+start_workers(Sup, WorkerArgs, NumWorkers) ->
+    F = fun(N, Workers) ->
+          WorkerName = get_worker_name(WorkerArgs, N),
+          {ok, _Pid} = start_worker(Sup, WorkerName, WorkerArgs),
+          queue:in(WorkerName, Workers)
+    end,
+  lists:foldl(F, queue:new(), lists:seq(1, NumWorkers)).
 
-do_start_workers(_WorkerArgs, Workers, 0) ->
-    Workers;
-do_start_workers(WorkerArgs, Workers, N) ->
-    WorkerName = get_worker_name(WorkerArgs, N),
-    {ok, Pid} = piper_worker:start_link(WorkerName, WorkerArgs),
-    do_start_workers(WorkerArgs, queue:in(Pid, Workers), N-1).
+start_worker(Sup, WorkerName, WorkerArgs) ->
+    ChildSpec = [{WorkerName, 
+                  {piper_worker, start_link, [WorkerName, WorkerArgs]},
+                  transient, 5000, worker, [piper_worker]}],
+    supervisor:start_child(Sup, ChildSpec).
 
 get_pool_name(WorkerFun) ->
     PoolString = erlang:fun_to_list(WorkerFun) ++ "_pool",
